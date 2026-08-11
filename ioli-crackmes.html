@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IOLI Crackmes 0x00–0x02 — Static Analysis Walkthrough — Tiu</title>
+<style>
+  :root { --bg:#0d1117; --fg:#e6edf3; --dim:#8b949e; --acc:#58a6ff; --card:#161b22; --line:#30363d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+        font:16px/1.7 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:860px; margin:0 auto; padding:2rem 1.2rem 4rem; }
+  header.site { border-bottom:1px solid var(--line); margin-bottom:2rem; padding-bottom:1rem; }
+  header.site h1 { margin:0; font-size:1.4rem; }
+  header.site .sub { color:var(--dim); font-size:.95rem; }
+  a { color:var(--acc); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  nav a { margin-right:1rem; color:var(--dim); }
+  article h1 { font-size:1.7rem; border-bottom:1px solid var(--line); padding-bottom:.4rem; }
+  h2 { margin-top:2rem; }
+  blockquote { margin:1rem 0; padding:.6rem 1rem; border-left:3px solid var(--acc);
+               background:var(--card); color:var(--dim); }
+  pre { background:var(--card); border:1px solid var(--line); border-radius:8px;
+        padding:1rem; overflow-x:auto; font-size:.88rem; }
+  code { font-family:"Cascadia Code",Consolas,Menlo,monospace; }
+  :not(pre) > code { background:var(--card); border:1px solid var(--line);
+                     border-radius:4px; padding:.1em .35em; font-size:.9em; }
+  table { border-collapse:collapse; width:100%; margin:1rem 0; }
+  th, td { border:1px solid var(--line); padding:.45rem .7rem; text-align:left; }
+  th { background:var(--card); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:1.1rem 1.3rem; margin:1rem 0; display:block; color:var(--fg); }
+  .card:hover { border-color:var(--acc); text-decoration:none; }
+  .card .meta { color:var(--dim); font-size:.88rem; margin-top:.3rem; }
+  .card h3 { margin:.1rem 0 .3rem; color:var(--acc); }
+  footer { margin-top:3rem; padding-top:1rem; border-top:1px solid var(--line);
+           color:var(--dim); font-size:.85rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="site">
+  <h1><a href="index.html" style="color:inherit">Tiu — Security Research Notes</a></h1>
+  <div class="sub">Binary exploitation · Reverse engineering · Memory & network forensics</div>
+  <nav><a href="index.html">Posts</a><a href="https://github.com/dabai-sec">GitHub</a></nav>
+</header>
+<h1>IOLI Crackmes 0x00–0x02 — Static Analysis Walkthrough</h1>
+<blockquote>
+<p><strong>Category:</strong> reverse engineering
+<strong>Targets:</strong> IOLI crackme series (public training set, i386 ELF)
+<strong>Tools:</strong> <code>strings</code>, <code>objdump</code>, manual logic recovery
+<strong>Environment:</strong> authorized training binaries, local lab</p>
+</blockquote>
+<p>The IOLI set is the "hello world" of reverse engineering: ten tiny binaries,
+each hiding a password check. This note covers levels 0x00–0x02 with a
+purely static workflow — no debugger, no decompiler, just <code>strings</code> and
+<code>objdump</code>, because that is all you need at this level.</p>
+<h2>0x00 — The plaintext compare</h2>
+<p>First contact: what does the binary import and what does it carry?</p>
+<pre><code>$ file crackme0x00
+crackme0x00: ELF 32-bit LSB executable, Intel i386, dynamically linked, not stripped
+
+$ strings crackme0x00
+printf
+strcmp                       &lt;- compare function imported
+scanf
+IOLI Crackme Level 0x00
+Password:
+250382                       &lt;- ...that looks like an answer
+Invalid Password!
+Password OK :)
+</code></pre>
+<p><code>strcmp</code> + a suspicious 6-digit constant sitting between the prompt and the
+verdict strings. The password is embedded in <code>.rodata</code> in cleartext.</p>
+<p><strong>Password: <code>250382</code></strong></p>
+<p>Lesson: before touching a disassembler, <em>listen to the binary</em>. <code>strings</code>
+and the import table alone solve level 0.</p>
+<h2>0x01 — The immediate compare</h2>
+<p>No cleartext this time. Disassemble <code>main</code> (Intel syntax — AT&amp;T is a crime
+against readability):</p>
+<pre><code>$ objdump -d crackme0x01 --disassemble=main -M intel
+...
+ 8048418:  lea    eax,[ebp-0x4]
+ 804841b:  mov    DWORD PTR [esp+0x4],eax
+ 804841f:  mov    DWORD PTR [esp],0x804854c
+ 8048426:  call   804830c &lt;scanf@plt&gt;        ; scanf(&quot;%d&quot;, &amp;input)
+ 804842b:  cmp    DWORD PTR [ebp-0x4],0x149a ; input vs 0x149a
+ 8048432:  je     8048442 &lt;main+0x5e&gt;        ; -&gt; &quot;Password OK&quot;
+</code></pre>
+<p>The check is a single integer compare against an immediate:</p>
+<pre><code>$ python3 -c &quot;print(0x149a)&quot;
+5274
+</code></pre>
+<p><strong>Password: <code>5274</code></strong></p>
+<p>Lesson: locate the <em>input sink</em> (<code>scanf</code>), then follow the variable to the
+first <code>cmp</code>. One instruction is the whole protection scheme.</p>
+<h2>0x02 — The computed compare</h2>
+<p>Now the constant is built at runtime. The relevant slice of <code>main</code>:</p>
+<pre><code> 804842b:  mov    DWORD PTR [ebp-0x8],0x5a    ; a = 0x5a   (90)
+ 8048432:  mov    DWORD PTR [ebp-0xc],0x1ec   ; b = 0x1ec  (492)
+ 8048439:  mov    edx,DWORD PTR [ebp-0xc]
+ 804843f:  add    DWORD PTR [eax],edx         ; a += b  -&gt; 90 + 492 = 582
+ 8048441:  mov    eax,DWORD PTR [ebp-0x8]
+ 8048444:  imul   eax,DWORD PTR [ebp-0x8]     ; a * a   -&gt; 582^2 = 338724
+ 8048448:  mov    DWORD PTR [ebp-0xc],eax     ; b = 338724
+ 804844b:  mov    eax,DWORD PTR [ebp-0x4]
+ 804844e:  cmp    eax,DWORD PTR [ebp-0xc]     ; input vs 338724
+</code></pre>
+<p>Recovered algorithm: <code>expected = (90 + 492)² = 338724</code>.</p>
+<p><strong>Password: <code>338724</code></strong></p>
+<p>Lesson: obfuscation here is just arithmetic. Trace the data flow through the
+stack slots and recompute by hand — no emulator required for straight-line code.</p>
+<h2>Summary</h2>
+<table>
+<thead>
+<tr>
+<th>Level</th>
+<th>Protection</th>
+<th>Answer</th>
+<th>Technique</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0x00</td>
+<td>plaintext in <code>.rodata</code></td>
+<td><code>250382</code></td>
+<td><code>strings</code></td>
+</tr>
+<tr>
+<td>0x01</td>
+<td>immediate <code>cmp</code></td>
+<td><code>5274</code></td>
+<td>read the <code>cmp</code> operand</td>
+</tr>
+<tr>
+<td>0x02</td>
+<td>runtime computation</td>
+<td><code>338724</code></td>
+<td>data-flow recovery</td>
+</tr>
+</tbody>
+</table>
+<p>The progression is the whole point of the series: each level moves the secret
+one step further from static visibility. Levels 0x03+ introduce control-flow
+tricks (<code>shift</code>/<code>dummy</code> env checks), which is where a debugger starts paying
+rent — covered in a future note.</p>
+<footer>All research performed in authorized environments (CTF events, lab ranges,
+public training datasets). · © 2026 Tiu</footer>
+</div>
+</body>
+</html>

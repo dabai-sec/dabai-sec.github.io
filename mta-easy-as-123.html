@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Malware-Traffic-Analysis — "Easy As 123" (2026-02-28) — Tiu</title>
+<style>
+  :root { --bg:#0d1117; --fg:#e6edf3; --dim:#8b949e; --acc:#58a6ff; --card:#161b22; --line:#30363d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+        font:16px/1.7 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:860px; margin:0 auto; padding:2rem 1.2rem 4rem; }
+  header.site { border-bottom:1px solid var(--line); margin-bottom:2rem; padding-bottom:1rem; }
+  header.site h1 { margin:0; font-size:1.4rem; }
+  header.site .sub { color:var(--dim); font-size:.95rem; }
+  a { color:var(--acc); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  nav a { margin-right:1rem; color:var(--dim); }
+  article h1 { font-size:1.7rem; border-bottom:1px solid var(--line); padding-bottom:.4rem; }
+  h2 { margin-top:2rem; }
+  blockquote { margin:1rem 0; padding:.6rem 1rem; border-left:3px solid var(--acc);
+               background:var(--card); color:var(--dim); }
+  pre { background:var(--card); border:1px solid var(--line); border-radius:8px;
+        padding:1rem; overflow-x:auto; font-size:.88rem; }
+  code { font-family:"Cascadia Code",Consolas,Menlo,monospace; }
+  :not(pre) > code { background:var(--card); border:1px solid var(--line);
+                     border-radius:4px; padding:.1em .35em; font-size:.9em; }
+  table { border-collapse:collapse; width:100%; margin:1rem 0; }
+  th, td { border:1px solid var(--line); padding:.45rem .7rem; text-align:left; }
+  th { background:var(--card); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:1.1rem 1.3rem; margin:1rem 0; display:block; color:var(--fg); }
+  .card:hover { border-color:var(--acc); text-decoration:none; }
+  .card .meta { color:var(--dim); font-size:.88rem; margin-top:.3rem; }
+  .card h3 { margin:.1rem 0 .3rem; color:var(--acc); }
+  footer { margin-top:3rem; padding-top:1rem; border-top:1px solid var(--line);
+           color:var(--dim); font-size:.85rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="site">
+  <h1><a href="index.html" style="color:inherit">Tiu — Security Research Notes</a></h1>
+  <div class="sub">Binary exploitation · Reverse engineering · Memory & network forensics</div>
+  <nav><a href="index.html">Posts</a><a href="https://github.com/dabai-sec">GitHub</a></nav>
+</header>
+<h1>Malware-Traffic-Analysis — "Easy As 123" (2026-02-28)</h1>
+<blockquote>
+<p><strong>Category:</strong> network forensics / incident response
+<strong>Source:</strong> <a href="https://www.malware-traffic-analysis.net/2026/02/28/index.html">malware-traffic-analysis.net training exercise</a> (public training pcap)
+<strong>Tools:</strong> Python 3 + Scapy (no Wireshark — full CLI workflow)
+<strong>Environment:</strong> authorized training dataset</p>
+</blockquote>
+<h2>Scenario</h2>
+<p>A SOC SIEM fires on <strong>NetSupport Manager RAT</strong> signatures for <code>45.131.214.85</code>
+over TCP/443, first seen 2026-02-28 19:55 UTC. We get the pcap captured on
+the victim host and must produce the incident report:</p>
+<ol>
+<li>IP address of the infected Windows client</li>
+<li>Its MAC address</li>
+<li>Its host name</li>
+<li>The Windows user account name</li>
+<li>The full name of that user</li>
+</ol>
+<p>Environment: LAN <code>10.2.28.0/24</code>, AD domain <code>easyas123.tech</code> (<code>EASYAS123</code>),
+DC at <code>10.2.28.2</code> (<code>EASYAS123-DC</code>), gateway <code>10.2.28.1</code>.</p>
+<h2>Step 1 — Pivot on the C2 indicator</h2>
+<p>Everything starts from the one IOC we have. Which internal host talks to
+<code>45.131.214.85</code>?</p>
+<pre><code class="language-python">from scapy.all import rdpcap, IP, Ether
+
+pkts = rdpcap(&quot;2026-02-28-traffic-analysis-exercise.pcap&quot;)
+C2 = &quot;45.131.214.85&quot;
+hits = [p for p in pkts if IP in p and (p[IP].src == C2 or p[IP].dst == C2)]
+hosts = {p[IP].src: p[Ether].src for p in hits if p[IP].dst == C2}
+print(hosts)
+</code></pre>
+<pre><code>total packets: 15512
+C2-related packets: 550
+{'10.2.28.88': '00:19:d1:b2:4d:ad'}
+first: 2026-02-28 19:55:51 UTC   &lt;- matches the SIEM timestamp
+</code></pre>
+<p><strong>Q1 → IP <code>10.2.28.88</code></strong> · <strong>Q2 → MAC <code>00:19:d1:b2:4d:ad</code></strong></p>
+<p>Note the C2 is contacted by raw IP — no DNS lookup for it exists in the
+capture. The host's DNS is pure Windows noise (<code>wpad.*</code>, MS telemetry),
+which is typical for NetSupport: the operator connects straight to the
+configured address.</p>
+<h2>Step 2 — Host name from Kerberos</h2>
+<p>In an AD environment the fastest hostname source is Kerberos itself: service
+tickets embed the target SPN. String-mining port-88 payloads:</p>
+<pre><code>'DESKTOP-TEYQ2NR '
+'desktop-teyq2nr.easyas123.tech'     &lt;- host/ SPN for our client
+'EASYAS123-DC.easyas123.tech'
+</code></pre>
+<p>(NBNS registration traffic shows the same name — <code>nbns</code> in Wireshark terms.)</p>
+<p><strong>Q3 → host name <code>DESKTOP-TEYQ2NR</code></strong></p>
+<h2>Step 3 — User account from Kerberos CNameString</h2>
+<p>AS-REQ/TGS-REQ packets carry the client principal in cleartext. Wireshark
+calls the field <code>kerberos.CNameString</code>; with Scapy it falls out of the same
+string pass:</p>
+<pre><code>'EASYAS123.TECH' | 'brolf' | 'krbtgt' | ...
+</code></pre>
+<p><code>brolf</code> appears as the cname across AS-REQ and TGS-REQ exchanges from
+10.2.28.88.</p>
+<p><strong>Q4 → user account <code>brolf</code></strong></p>
+<h2>Step 4 — Full name: the UTF-16 trap</h2>
+<p>The account looks like first-initial + last name (<code>b</code> + <code>rolf</code>). Hunting for
+the display name with a naive ASCII grep finds <strong>nothing</strong>:</p>
+<pre><code>b&quot;Rolf&quot; in payload        -&gt; 0 hits
+&quot;Rolf&quot; in UTF-16-LE ...   -&gt; 1 hit, SMB (TCP 445)
+</code></pre>
+<p>Windows SMB carries identity strings in UTF-16-LE, which defeats plain
+<code>strings</code> and case-sensitive packet searches. Scanning every frame's raw
+bytes for the UTF-16 pattern:</p>
+<pre><code class="language-python">pat = &quot;Rolf&quot;.encode(&quot;utf-16-le&quot;)
+for i, p in enumerate(pkts):
+    raw = bytes(p)
+    j = raw.find(pat)
+    if j &gt;= 0:
+        print(i, raw[j-160:j+64].decode(&quot;utf-16-le&quot;, errors=&quot;replace&quot;))
+</code></pre>
+<pre><code>--- pkt 338  TCP:445&gt;59988  (DC -&gt; client, session setup / account info)
+'...brolf\x00\x00\x00...Becka Rolf\x00\x00\x00...'
+</code></pre>
+<p>The DC's reply pairs the sAMAccountName (<code>brolf</code>) with the account's display
+name.</p>
+<p><strong>Q5 → full name <code>Becka Rolf</code></strong></p>
+<h2>Incident report</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+<th>Evidence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Infected client IP</td>
+<td><code>10.2.28.88</code></td>
+<td>550 frames with C2 <code>45.131.214.85</code></td>
+</tr>
+<tr>
+<td>MAC</td>
+<td><code>00:19:d1:b2:4d:ad</code></td>
+<td>Ethernet src on C2-bound frames</td>
+</tr>
+<tr>
+<td>Host name</td>
+<td><code>DESKTOP-TEYQ2NR</code></td>
+<td>Kerberos SPN / NBNS</td>
+</tr>
+<tr>
+<td>User account</td>
+<td><code>brolf</code></td>
+<td><code>kerberos.CNameString</code></td>
+</tr>
+<tr>
+<td>Full name</td>
+<td><code>Becka Rolf</code></td>
+<td>SMB session info, UTF-16-LE</td>
+</tr>
+<tr>
+<td>C2</td>
+<td><code>45.131.214.85:443</code></td>
+<td>active 19:55:51 UTC 02-28 → 00:16 UTC 03-01</td>
+</tr>
+<tr>
+<td>Malware</td>
+<td>NetSupport Manager RAT</td>
+<td>SIEM signature + matching traffic</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Recommended actions:</strong> isolate <code>DESKTOP-TEYQ2NR</code>, reset credentials for
+<code>brolf</code> (Kerberos tickets were active during compromise), block
+<code>45.131.214.85</code> egress, and hunt the fleet for the same destination IP.</p>
+<h2>Takeaways</h2>
+<ul>
+<li>One network IOC → full host/user attribution using only AD chatter that is
+  <em>already in the air</em>: Kerberos principals, NBNS names, SMB session data.</li>
+<li>The single most useful habit: <strong>try UTF-16-LE when ASCII search fails</strong> on
+  Windows protocol traffic. Half of host attribution hides there.</li>
+<li>Scapy is a perfectly serviceable Wireshark substitute for scripted triage —
+  the whole analysis above is ~40 lines of Python (see <code>analyze.py</code>).</li>
+</ul>
+<footer>All research performed in authorized environments (CTF events, lab ranges,
+public training datasets). · © 2026 Tiu</footer>
+</div>
+</body>
+</html>

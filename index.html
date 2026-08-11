@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Security Research Notes — Tiu</title>
+<style>
+  :root { --bg:#0d1117; --fg:#e6edf3; --dim:#8b949e; --acc:#58a6ff; --card:#161b22; --line:#30363d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+        font:16px/1.7 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:860px; margin:0 auto; padding:2rem 1.2rem 4rem; }
+  header.site { border-bottom:1px solid var(--line); margin-bottom:2rem; padding-bottom:1rem; }
+  header.site h1 { margin:0; font-size:1.4rem; }
+  header.site .sub { color:var(--dim); font-size:.95rem; }
+  a { color:var(--acc); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  nav a { margin-right:1rem; color:var(--dim); }
+  article h1 { font-size:1.7rem; border-bottom:1px solid var(--line); padding-bottom:.4rem; }
+  h2 { margin-top:2rem; }
+  blockquote { margin:1rem 0; padding:.6rem 1rem; border-left:3px solid var(--acc);
+               background:var(--card); color:var(--dim); }
+  pre { background:var(--card); border:1px solid var(--line); border-radius:8px;
+        padding:1rem; overflow-x:auto; font-size:.88rem; }
+  code { font-family:"Cascadia Code",Consolas,Menlo,monospace; }
+  :not(pre) > code { background:var(--card); border:1px solid var(--line);
+                     border-radius:4px; padding:.1em .35em; font-size:.9em; }
+  table { border-collapse:collapse; width:100%; margin:1rem 0; }
+  th, td { border:1px solid var(--line); padding:.45rem .7rem; text-align:left; }
+  th { background:var(--card); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:1.1rem 1.3rem; margin:1rem 0; display:block; color:var(--fg); }
+  .card:hover { border-color:var(--acc); text-decoration:none; }
+  .card .meta { color:var(--dim); font-size:.88rem; margin-top:.3rem; }
+  .card h3 { margin:.1rem 0 .3rem; color:var(--acc); }
+  footer { margin-top:3rem; padding-top:1rem; border-top:1px solid var(--line);
+           color:var(--dim); font-size:.85rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="site">
+  <h1><a href="index.html" style="color:inherit">Tiu — Security Research Notes</a></h1>
+  <div class="sub">Binary exploitation · Reverse engineering · Memory & network forensics</div>
+  <nav><a href="index.html">Posts</a><a href="https://github.com/dabai-sec">GitHub</a></nav>
+</header>
+<h2 style='border:none'>Research notes & CTF writeups</h2>
+<p style='color:var(--dim)'>Reproducible, script-first walkthroughs. Sources: <a href='https://github.com/dabai-sec/ctf-writeups'>github.com/dabai-sec/ctf-writeups</a></p>
+<a class="card" href="ret2win.html"><h3>ROP Emporium — ret2win (x86_64)</h3><div class="meta">pwn · Category: pwn / binary exploitation Binary: ret2win (ROP Emporium, x86_64) Techniques: stack buffer overflow, ret2win, ROP stack alignment (movaps / SIGSEGV gotcha) Environment: au…</div></a>
+<a class="card" href="split.html"><h3>ROP Emporium — split (x86_64)</h3><div class="meta">pwn · Category: pwn / binary exploitation Binary: split (ROP Emporium, x86_64) Techniques: stack overflow → ROP chain, pop rdi; ret gadget hunting, calling system() with a controlled arg…</div></a>
+<a class="card" href="ioli-crackmes.html"><h3>IOLI Crackmes 0x00–0x02 — Static Analysis Walkthrough</h3><div class="meta">reversing · Category: reverse engineering Targets: IOLI crackme series (public training set, i386 ELF) Tools: strings, objdump, manual logic recovery Environment: authorized training binaries,…</div></a>
+<a class="card" href="mta-easy-as-123.html"><h3>Malware-Traffic-Analysis — "Easy As 123" (2026-02-28)</h3><div class="meta">forensics · Category: network forensics / incident response Source: malware-traffic-analysis.net training exercise (public training pcap) Tools: Python 3 + Scapy (no Wireshark — full CLI workf…</div></a>
+<footer>All research performed in authorized environments (CTF events, lab ranges,
+public training datasets). · © 2026 Tiu</footer>
+</div>
+</body>
+</html>
