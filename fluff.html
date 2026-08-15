@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ROP Emporium — fluff (x86_64) — Tiu</title>
+<style>
+  :root { --bg:#0d1117; --fg:#e6edf3; --dim:#8b949e; --acc:#58a6ff; --card:#161b22; --line:#30363d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+        font:16px/1.7 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:860px; margin:0 auto; padding:2rem 1.2rem 4rem; }
+  header.site { border-bottom:1px solid var(--line); margin-bottom:2rem; padding-bottom:1rem; }
+  header.site h1 { margin:0; font-size:1.4rem; }
+  header.site .sub { color:var(--dim); font-size:.95rem; }
+  a { color:var(--acc); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  nav a { margin-right:1rem; color:var(--dim); }
+  article h1 { font-size:1.7rem; border-bottom:1px solid var(--line); padding-bottom:.4rem; }
+  h2 { margin-top:2rem; }
+  blockquote { margin:1rem 0; padding:.6rem 1rem; border-left:3px solid var(--acc);
+               background:var(--card); color:var(--dim); }
+  pre { background:var(--card); border:1px solid var(--line); border-radius:8px;
+        padding:1rem; overflow-x:auto; font-size:.88rem; }
+  code { font-family:"Cascadia Code",Consolas,Menlo,monospace; }
+  :not(pre) > code { background:var(--card); border:1px solid var(--line);
+                     border-radius:4px; padding:.1em .35em; font-size:.9em; }
+  table { border-collapse:collapse; width:100%; margin:1rem 0; }
+  th, td { border:1px solid var(--line); padding:.45rem .7rem; text-align:left; }
+  th { background:var(--card); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:1.1rem 1.3rem; margin:1rem 0; display:block; color:var(--fg); }
+  .card:hover { border-color:var(--acc); text-decoration:none; }
+  .card .meta { color:var(--dim); font-size:.88rem; margin-top:.3rem; }
+  .card h3 { margin:.1rem 0 .3rem; color:var(--acc); }
+  footer { margin-top:3rem; padding-top:1rem; border-top:1px solid var(--line);
+           color:var(--dim); font-size:.85rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="site">
+  <h1><a href="index.html" style="color:inherit">Tiu — Security Research Notes</a></h1>
+  <div class="sub">Binary exploitation · Reverse engineering · Memory & network forensics</div>
+  <nav><a href="index.html">Posts</a><a href="https://github.com/dabai-sec">GitHub</a></nav>
+</header>
+<h1>ROP Emporium — fluff (x86_64)</h1>
+<blockquote>
+<p><strong>Category:</strong> pwn / binary exploitation
+<strong>Binary:</strong> <a href="https://ropemporium.com/challenge/fluff.html">fluff</a> (ROP Emporium, x86_64)
+<strong>Techniques:</strong> stack overflow → ROP, exotic gadget set (<code>xlat</code> / <code>bextr</code> / <code>stosb</code>), byte-scavenging from the binary, register state calibration
+<strong>Environment:</strong> authorized training binary, local lab (gdb for tracing)</p>
+</blockquote>
+<p><code>fluff</code> is the series' difficulty spike: no <code>pop rdx</code>, no clean
+write-what-where. The intended primitive set is three weird instructions,
+and the whole solve is learning to think in terms of them.</p>
+<h2>1. Recon</h2>
+<p>Same layout as the rest of the series: <code>pwnme()</code> in <code>libfluff.so</code>,
+32-byte stack buffer, <code>read(0, buf, 0x200)</code>, return address at offset 40.
+The only toys we get:</p>
+<pre><code>0000000000400628 &lt;questionableGadgets&gt;:
+  400628:  xlat   [rbx]                 ; ret
+  40062a:  pop    rdx
+  40062b:  pop    rcx
+  40062c:  add    rcx, 0x3ef2
+  400633:  bextr  rbx, rcx, rdx         ; ret
+  400639:  stos   al, [rdi]             ; ret
+</code></pre>
+<p>Three primitives:</p>
+<table>
+<thead>
+<tr>
+<th>Gadget</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>bextr</code> block</td>
+<td>set <code>rbx</code> to an arbitrary 64-bit value (with a <code>+0x3ef2</code> quirk)</td>
+</tr>
+<tr>
+<td><code>xlat</code></td>
+<td><code>al = [rbx + al]</code> — a lookup table read</td>
+</tr>
+<tr>
+<td><code>stosb</code></td>
+<td><code>[rdi] = al; rdi++</code> — a byte writer</td>
+</tr>
+</tbody>
+</table>
+<p>Plan: use <code>xlat</code> as a byte-grabber — point <code>rbx</code> at a byte inside the
+binary whose value is the character we want, load it into <code>al</code>, then
+<code>stosb</code> it into <code>.bss</code>. Eight iterations spells <code>"flag.txt"</code>.</p>
+<h2>2. The two traps (both verified the hard way)</h2>
+<p><strong>Trap 1 — the hidden <code>+0x3ef2</code>.</strong> The <code>bextr</code> block is not a clean
+register load: <code>add rcx, 0x3ef2</code> runs between the pop and the extract.
+With <code>rdx = 0x4000</code> (start=0, length=64) <code>bextr</code> passes all 64 bits
+through, so <code>rbx = popped_value + 0x3ef2</code>. Every address you load must be
+pre-compensated: push <code>target - 0x3ef2</code>. My first chain forgot this and
+dereferenced <code>0x4042b6</code> (unmapped) — SIGSEGV on the first <code>xlat</code>, found in
+seconds with a gdb trace:</p>
+<pre><code>xlat: rbx=0x600f8b al=0xb        &lt;- calibration step, fine
+xlat: rbx=0x4042b6 al=0          &lt;- char 'f': A+0x3ef2, off by ADJ. boom.
+</code></pre>
+<p><strong>Trap 2 — <code>al</code> is not yours at the start.</strong> <code>xlat</code> computes
+<code>[rbx + al]</code>, and <code>al</code> at chain entry is whatever <code>pwnme</code>'s last libc call
+left in it. Here that's <code>puts("Thank you!")</code>, which returns <strong>11</strong> — so
+<code>al = 0x0b</code>, and every lookup is skewed by 11 unless you correct for it.
+Rather than trusting that number (it is libc-dependent), calibrate: point
+<code>rbx</code> at a long run of zero bytes in mapped memory (<code>0x600f8b</code>, 118 zero
+bytes — confirmed via <code>readelf -l</code> segment math). Then
+<code>al = [ZERORUN + al] = 0</code> for <em>any</em> starting <code>al</code> below 118, no guesses.</p>
+<p>After calibration, each character is:</p>
+<pre><code>rbx = A_char - al_prev      (via bextr, pre-compensated for +0x3ef2)
+xlat                        al = [rbx + al_prev] = the character
+stosb                       write it, rdi++
+</code></pre>
+<p>Byte sources: every character of <code>flag.txt</code> exists somewhere in the
+read-only LOAD segment (<code>0x400000–0x400838</code>); the exploit just scans the
+file image for the first occurrence of each byte.</p>
+<h2>3. Run</h2>
+<pre><code>$ python3 exploit.py
+fluff by ROP Emporium
+x86_64
+You know changing these strings means I have to rewrite my solutions...
+&gt; Thank you!
+ROPE{a_placeholder_32byte_flag!}
+</code></pre>
+<p>(The trailing SIGSEGV afterwards is just the chain ending with no clean
+exit — the flag is already out.)</p>
+<p>Flag: <code>ROPE{a_placeholder_32byte_flag!}</code>.</p>
+<h2>Takeaway</h2>
+<p>Exotic-gadget ROP is bookkeeping. The two things that actually bite are
+never the gadgets themselves but the <strong>side effects</strong> (<code>add rcx,0x3ef2</code>
+buried mid-gadget) and the <strong>inherited state</strong> (<code>al</code> from the last libc
+call). A five-line gdb breakpoint script turns both from guesswork into
+printed facts.</p>
+<footer>All research performed in authorized environments (CTF events, lab ranges,
+public training datasets). · © 2026 Tiu</footer>
+</div>
+</body>
+</html>
