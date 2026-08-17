@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MemLabs Lab 1 — "Beginner's Luck" memory forensics — Tiu</title>
+<style>
+  :root { --bg:#0d1117; --fg:#e6edf3; --dim:#8b949e; --acc:#58a6ff; --card:#161b22; --line:#30363d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+        font:16px/1.7 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:860px; margin:0 auto; padding:2rem 1.2rem 4rem; }
+  header.site { border-bottom:1px solid var(--line); margin-bottom:2rem; padding-bottom:1rem; }
+  header.site h1 { margin:0; font-size:1.4rem; }
+  header.site .sub { color:var(--dim); font-size:.95rem; }
+  a { color:var(--acc); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  nav a { margin-right:1rem; color:var(--dim); }
+  article h1 { font-size:1.7rem; border-bottom:1px solid var(--line); padding-bottom:.4rem; }
+  h2 { margin-top:2rem; }
+  blockquote { margin:1rem 0; padding:.6rem 1rem; border-left:3px solid var(--acc);
+               background:var(--card); color:var(--dim); }
+  pre { background:var(--card); border:1px solid var(--line); border-radius:8px;
+        padding:1rem; overflow-x:auto; font-size:.88rem; }
+  code { font-family:"Cascadia Code",Consolas,Menlo,monospace; }
+  :not(pre) > code { background:var(--card); border:1px solid var(--line);
+                     border-radius:4px; padding:.1em .35em; font-size:.9em; }
+  table { border-collapse:collapse; width:100%; margin:1rem 0; }
+  th, td { border:1px solid var(--line); padding:.45rem .7rem; text-align:left; }
+  th { background:var(--card); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:1.1rem 1.3rem; margin:1rem 0; display:block; color:var(--fg); }
+  .card:hover { border-color:var(--acc); text-decoration:none; }
+  .card .meta { color:var(--dim); font-size:.88rem; margin-top:.3rem; }
+  .card h3 { margin:.1rem 0 .3rem; color:var(--acc); }
+  footer { margin-top:3rem; padding-top:1rem; border-top:1px solid var(--line);
+           color:var(--dim); font-size:.85rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="site">
+  <h1><a href="index.html" style="color:inherit">Tiu — Security Research Notes</a></h1>
+  <div class="sub">Binary exploitation · Reverse engineering · Memory & network forensics</div>
+  <nav><a href="index.html">Posts</a><a href="https://github.com/dabai-sec">GitHub</a></nav>
+</header>
+<h1>MemLabs Lab 1 — "Beginner's Luck" memory forensics</h1>
+<blockquote>
+<p><strong>Category:</strong> digital forensics / memory analysis
+<strong>Dataset:</strong> <a href="https://github.com/stuxnet999/MemLabs">MemLabs Lab 1</a> (<code>MemoryDump_Lab1.raw</code>, md5 <code>b9fec1a443907d870cb32b048bda9380</code>)
+<strong>Scenario:</strong> "My sister's computer crashed. We recovered this memory dump. She suddenly saw a black window pop up with something being executed. When the crash happened, she was trying to draw something."
+<strong>Tools:</strong> Volatility 3, Python (custom Mega.nz downloader, custom DIB carving), strings
+<strong>Environment:</strong> authorized public training dataset</p>
+</blockquote>
+<h2>0. Getting the image without a browser</h2>
+<p>The dataset ships as a 7-zip archive behind a Mega.nz public link. Instead of
+the browser, I scripted the whole fetch: Mega's <code>g.api.mega.co.nz/cs</code> endpoint
+returns the CDN URL for a public handle, and the payload decrypts with
+AES-128-CTR using a key folded out of the 32-byte link fragment
+(<code>k[i] ^ k[i+16]</code> u32-folding, 8-byte CTR prefix IV). Verified end-to-end:
+the downloaded archive's MD5 (<code>919a0ded...</code>) matches the challenge page, and
+the inner dump matches too (<code>b9fec1a4...</code>).</p>
+<h2>1. Image identification</h2>
+<pre><code>$ vol -q -f MemoryDump_Lab1.raw windows.info
+Kernel Base     0xf8000261f000
+DTB             0x187000
+Is64Bit         True
+NTBuildLab      7601.17514.amd64fre.win7sp1_rtm.
+Major/Minor     15.7601
+SystemTime      2019-12-11 14:38:00+00:00
+</code></pre>
+<p>Windows 7 SP1 x64, captured 2019-12-11 14:38 UTC. (Volatility 3 pulled the
+<code>ntkrnlmp.pdb</code> ISF for build <code>3844DBB9...</code> itself; on a locked-down network
+you'd pre-stage that symbol file.)</p>
+<h2>2. Process timeline (pslist)</h2>
+<p>Filtering the noise, the user-session story reconstructs itself:</p>
+<pre><code>PID    PPID  Image          Session  CreateTime
+604    2016  explorer.exe   1        14:32:25   &lt;- interactive desktop
+1984   604   cmd.exe        1        14:34:54   &lt;- &quot;black window&quot;
+2692   368   conhost.exe    1        14:34:54
+2424   604   mspaint.exe    1        14:35:14   &lt;- the drawing
+1512   2504  WinRAR.exe     2        14:37:23   &lt;- a second user session
+796    604   DumpIt.exe     1        14:37:54   &lt;- memory capture
+</code></pre>
+<p><code>cmd.exe</code> out of <code>explorer.exe</code>, three and a half minutes before <code>DumpIt.exe</code>
+froze the machine — consistent with the witness story.</p>
+<h2>3. What ran in the black window</h2>
+<p><code>windows.cmdline</code> gives bare <code>cmd.exe</code> (no arguments), so the answer lives in
+the console memory. Two independent artifacts agree:</p>
+<ul>
+<li><code>strings -e l</code> over the image: window title <code>C:\Windows\system32\cmd.exe - St4G3$1</code></li>
+<li>process dump of PID 1984: same title, working dir <code>C:\Users\SmartNet</code>, <code>ECHO OFF</code> (batch context)</li>
+</ul>
+<p>And a raw <code>strings</code> pass over the image shows the supporting cast on the
+desktop:</p>
+<pre><code>C:\Users\SmartNet\Desktop\St4G3$1.bat
+SmartNet\Desktop\St4g3$1.txt
+SmartNet\Desktop\st4G3$$1.txt
+St4G3$1.bat.lnk
+</code></pre>
+<p>A batch file <code>St4G3$1.bat</code> on the desktop, plus two text files. The console
+title carries the stage name — that is the executed-payload evidence.</p>
+<h2>4. The second user &amp; the "important" archive</h2>
+<p><code>cmdline</code> on the session-2 process:</p>
+<pre><code>1512  WinRAR.exe  &quot;C:\Program Files\WinRAR\WinRAR.exe&quot; &quot;C:\Users\Alissa Simpson\Documents\Important.rar&quot;
+</code></pre>
+<p>A second user (<code>Alissa Simpson</code>) had opened <code>Important.rar</code> from her
+Documents. <code>windows.filescan</code> shows three <code>_FILE_OBJECT</code>s for it, but
+<code>windows.dumpfiles</code> on all three returns nothing: <strong>the archive's bytes were
+not resident in memory</strong> — the object records the open, not the content. A
+good reminder that a RAM image is a <em>cache</em>, not a disk; un-cached file
+content is simply not in it.</p>
+<h2>5. Browser history fallout</h2>
+<p>Firefox had just been installed on this box — proven by a ROT13'd uninstall
+string sitting in the image:</p>
+<pre><code>P:\Hfref\FznegArg\Qbjaybnqf\Sversbk Vafgnyyre.rkr
+   --ROT13--&gt;  C:\Users\SmartNet\Downloads\Firefox Installer.exe
+</code></pre>
+<p>and its history already records the two text files being opened:</p>
+<pre><code>Visited: SmartNet@file:///C:/Users/SmartNet/Desktop/St4g3$1.txt
+Visited: SmartNet@file:///C:/Users/SmartNet/Desktop/st4G3$$1.txt
+</code></pre>
+<h2>6. The drawing (mspaint, PID 2424)</h2>
+<p><code>windows.memmap --pid 2424 --dump</code> exports the process. The canvas buffer is
+locatable as a ~2.1 MB <code>0xFF</code>-filled region (white background), but it is
+almost entirely blank: she had <em>just</em> started drawing when the dump hit. The
+resident canvas contains only a handful of dark pixels — no readable content
+is recoverable from this capture. (Documented here because "the drawing
+recovered nothing" is itself a legitimate negative finding: the narrative
+said she <em>was trying to</em> draw, and the memory agrees she barely did.)</p>
+<h2>Evidence chain</h2>
+<table>
+<thead>
+<tr>
+<th>Witness claim</th>
+<th>Memory evidence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>"black window popped up and executed something"</td>
+<td><code>cmd.exe</code> (PID 1984) 14:34:54, console title <code>…cmd.exe - St4G3$1</code>, batch context (<code>ECHO OFF</code>), <code>St4G3$1.bat</code> on desktop</td>
+</tr>
+<tr>
+<td>"she was trying to draw"</td>
+<td><code>mspaint.exe</code> (PID 2424) 14:35:14, canvas buffer resident but ~blank</td>
+</tr>
+<tr>
+<td>"important files"</td>
+<td><code>Important.rar</code> opened by WinRAR in Alissa Simpson's session; file objects present, content not cached</td>
+</tr>
+</tbody>
+</table>
+<h2>Methodology notes</h2>
+<ul>
+<li><strong>Two independent sources per claim.</strong> Process lists + raw strings +
+  console memory all cross-checked before calling anything a finding.</li>
+<li><strong>Negative results are findings.</strong> "The RAR content is not in the dump"
+  tells you the acquisition scope, and matters for what you promise a client.</li>
+<li><strong>Carving is a lottery.</strong> The DIB/PNG carving passes recovered Windows
+  icons and thumbnails but no case-relevant imagery; when the content was
+  never paged in, no carver will invent it.</li>
+<li><strong>Reproducibility:</strong> every output above comes from the commands shown;
+  image MD5 verified against the challenge page before analysis began.</li>
+</ul>
+<footer>All research performed in authorized environments (CTF events, lab ranges,
+public training datasets). · © 2026 Tiu</footer>
+</div>
+</body>
+</html>
